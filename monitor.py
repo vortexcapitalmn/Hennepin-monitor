@@ -115,18 +115,36 @@ def format_email(detail):
 
     return subject, html
 
-def send_email(subject, html_body):
+def send_email(subject, html_body, max_retries=3):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = EMAIL_SENDER
     msg["To"] = EMAIL_TO
     msg.attach(MIMEText(html_body, "html"))
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, EMAIL_TO, msg.as_string())
-    print("Email sent: " + subject)
+
+    for attempt in range(1, max_retries + 1):
+        server = None
+        try:
+            server = smtplib.SMTP("smtp.gmail.com", 587, timeout=30)
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_SENDER, [EMAIL_TO], msg.as_string())
+            print("Email sent: " + subject)
+            return True
+        except Exception as e:
+            print(f"Email attempt {attempt} failed: {e}")
+            if attempt < max_retries:
+                time.sleep(5)
+            else:
+                return False
+        finally:
+            if server:
+                try:
+                    server.quit()
+                except:
+                    pass
 
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
