@@ -25,7 +25,7 @@ HEADERS = {
     "Ocp-Apim-Subscription-Key": "e522a816143443189f09de85c4288b98",
 }
 
-PAYLOAD = {
+BASE_PAYLOAD = {
     "address": None,
     "city": None,
     "dateOfSale": None,
@@ -33,30 +33,60 @@ PAYLOAD = {
     "pagination": {"activePage": 1, "pageSize": 100}
 }
 
+
 def load_seen():
     if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE) as f:
+        with open(SEEN_FILE, "r") as f:
             return set(json.load(f))
     return set()
 
+
 def save_seen(seen):
     with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen), f)
+        json.dump(sorted(list(seen)), f)
+
 
 def fetch_sales():
-    try:
-        resp = requests.post(API_URL, headers=HEADERS, json=PAYLOAD, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, list):
-            return data
-        for key in ["data", "items", "results", "records", "foreclosures", "value"]:
-            if key in data:
-                return data[key]
-        return []
-    except Exception as e:
-        print("ERROR fetching sales: " + str(e))
-        return []
+    all_records = []
+    page = 1
+
+    while True:
+        try:
+            payload = dict(BASE_PAYLOAD)
+            payload["pagination"] = {"activePage": page, "pageSize": 100}
+
+            resp = requests.post(API_URL, headers=HEADERS, json=payload, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+
+            records = None
+            if isinstance(data, list):
+                records = data
+            else:
+                for key in ["data", "items", "results", "records", "foreclosures", "value"]:
+                    if key in data:
+                        records = data[key]
+                        break
+
+            if not records:
+                print(f"No more records found on page {page}")
+                break
+
+            print(f"Fetched page {page} with {len(records)} records")
+            all_records.extend(records)
+
+            if len(records) < 100:
+                break
+
+            page += 1
+            time.sleep(0.5)
+
+        except Exception as e:
+            print("ERROR fetching sales: " + str(e))
+            break
+
+    return all_records
+
 
 def fetch_detail(record_id):
     try:
@@ -64,14 +94,16 @@ def fetch_detail(record_id):
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        print("ERROR fetching detail: " + str(e))
+        print("ERROR fetching detail for " + str(record_id) + ": " + str(e))
         return {}
+
 
 def get_record_id(record):
     for key in ["saleRecordNumber", "id", "recordNumber", "saleId"]:
-        if key in record:
+        if key in record and record[key]:
             return str(record[key])
     return None
+
 
 def g(detail, *keys):
     for k in keys:
@@ -79,6 +111,14 @@ def g(detail, *keys):
         if v:
             return str(v)
     return "N/A"
+
+
+def is_2026_sale(detail):
+    sale_date_str = g(detail, "saleDate", "dateOfSale")
+    if sale_date_str == "N/A":
+        return False
+    return "2026" in sale_date_str
+
 
 def format_email(detail):
     address = g(detail, "address", "unverifiedCommonAddress", "propertyAddress")
@@ -115,6 +155,7 @@ def format_email(detail):
 
     return subject, html
 
+
 def send_email(subject, html_body, max_retries=3):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -134,7 +175,7 @@ def send_email(subject, html_body, max_retries=3):
             print("Email sent: " + subject)
             return True
         except Exception as e:
-            print(f"Email attempt {attempt} failed: {e}")
+            print(f"Email attempt {attempt} failed for {subject}: {e}")
             if attempt < max_retries:
                 time.sleep(5)
             else:
@@ -146,50 +187,65 @@ def send_email(subject, html_body, max_retries=3):
                 except:
                     pass
 
+
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def check_for_new_sales():
     print("[" + now() + "] Checking Hennepin County...")
     seen = load_seen()
-    sales = fetch_sales()
+    print("Loaded seen records: " + str(len(seen)))
 
+    sales = fetch_sales()
     if not sales:
         print("No records returned")
         return
 
-    print("Found " + str(len(sales)) + " total records")
+    print("Found " + str(len(sales)) + " total records across all pages")
     new_count = 0
+    skipped_non_2026 = 0
 
     for record in sales:
         record_id = get_record_id(record)
         if not record_id:
             continue
 
-        if record_id not in seen:
-            print("NEW record: " + record_id)
-            detail = fetch_detail(record_id)
-            if not detail:
-                detail = record
+        if record_id in seen:
+            continue
 
-            try:
-                subject, html = format_email(detail)
-                success = send_email(subject, html)
+        print("NEW record candidate: " + record_id)
 
-                if success:
-                    seen.add(record_id)
-                    new_count += 1
-                    print("Marked seen: " + record_id)
-                else:
-                    print("FAILED permanently, will retry next run: " + record_id)
+        detail = fetch_detail(record_id)
+        if not detail:
+            detail = record
 
-            except Exception as e:
-                print("ERROR sending email: " + str(e))
+        if not is_2026_sale(detail):
+            skipped_non_2026 += 1
+            print("Skipping non-2026 record: " + record_id)
+            continue
 
-            time.sleep(1.5)
+        try:
+            subject, html = format_email(detail)
+            success = send_email(subject, html)
+
+            if success:
+                seen.add(record_id)
+                new_count += 1
+                print("Marked seen: " + record_id)
+            else:
+                print("FAILED permanently, will retry next run: " + record_id)
+
+        except Exception as e:
+            print("ERROR sending email for " + record_id + ": " + str(e))
+
+        time.sleep(1.5)
 
     save_seen(seen)
-    print("Done. " + str(new_count) + " new leads. Total tracked: " + str(len(seen)))
+    print("Done. " + str(new_count) + " new 2026 leads emailed.")
+    print("Skipped non-2026 leads: " + str(skipped_non_2026))
+    print("Total tracked: " + str(len(seen)))
+
 
 if __name__ == "__main__":
     print("Hennepin Foreclosure Monitor starting...")
