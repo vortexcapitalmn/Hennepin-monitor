@@ -108,8 +108,29 @@ def get_record_id(record):
 def g(detail, *keys):
     for k in keys:
         v = detail.get(k)
-        if v:
-            return str(v)
+        if not v:
+            continue
+
+        if isinstance(v, list):
+            values = []
+            for item in v:
+                if isinstance(item, dict):
+                    if item.get("display"):
+                        values.append(str(item["display"]))
+                    elif item.get("name"):
+                        values.append(str(item["name"]))
+                else:
+                    values.append(str(item))
+            return "<br>".join(values) if values else "N/A"
+
+        if isinstance(v, dict):
+            if v.get("display"):
+                return str(v["display"])
+            if v.get("name"):
+                return str(v["name"])
+
+        return str(v)
+
     return "N/A"
 
 
