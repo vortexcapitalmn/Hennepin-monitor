@@ -153,34 +153,41 @@ def check_for_new_sales():
     print("[" + now() + "] Checking Hennepin County...")
     seen = load_seen()
     sales = fetch_sales()
+
     if not sales:
         print("No records returned")
         return
+
     print("Found " + str(len(sales)) + " total records")
     new_count = 0
+
     for record in sales:
         record_id = get_record_id(record)
         if not record_id:
             continue
+
         if record_id not in seen:
             print("NEW record: " + record_id)
             detail = fetch_detail(record_id)
             if not detail:
                 detail = record
-            try:
-    subject, html = format_email(detail)
-    success = send_email(subject, html)
-    if success:
-        seen.add(record_id)
-        new_count += 1
-        print("Marked seen: " + record_id)
-    else:
-        print("FAILED permanently, will retry next run: " + record_id)
-except Exception as e:
-    print("ERROR sending email: " + str(e))
 
-time.sleep(1.5)
-            new_count += 1
+            try:
+                subject, html = format_email(detail)
+                success = send_email(subject, html)
+
+                if success:
+                    seen.add(record_id)
+                    new_count += 1
+                    print("Marked seen: " + record_id)
+                else:
+                    print("FAILED permanently, will retry next run: " + record_id)
+
+            except Exception as e:
+                print("ERROR sending email: " + str(e))
+
+            time.sleep(1.5)
+
     save_seen(seen)
     print("Done. " + str(new_count) + " new leads. Total tracked: " + str(len(seen)))
 
