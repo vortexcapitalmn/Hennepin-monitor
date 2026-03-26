@@ -168,11 +168,18 @@ def check_for_new_sales():
             if not detail:
                 detail = record
             try:
-                subject, html = format_email(detail)
-                send_email(subject, html)
-            except Exception as e:
-                print("ERROR sending email: " + str(e))
-            seen.add(record_id)
+    subject, html = format_email(detail)
+    success = send_email(subject, html)
+    if success:
+        seen.add(record_id)
+        new_count += 1
+        print("Marked seen: " + record_id)
+    else:
+        print("FAILED permanently, will retry next run: " + record_id)
+except Exception as e:
+    print("ERROR sending email: " + str(e))
+
+time.sleep(1.5)
             new_count += 1
     save_seen(seen)
     print("Done. " + str(new_count) + " new leads. Total tracked: " + str(len(seen)))
