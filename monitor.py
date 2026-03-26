@@ -48,7 +48,6 @@ def fetch_sales():
         resp = requests.post(API_URL, headers=HEADERS, json=PAYLOAD, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        print("API keys: " + str(list(data.keys()) if isinstance(data, dict) else type(data)))
         if isinstance(data, list):
             return data
         for key in ["data", "items", "results", "records", "foreclosures", "value"]:
@@ -122,7 +121,9 @@ def send_email(subject, html_body):
     msg["From"] = EMAIL_SENDER
     msg["To"] = EMAIL_TO
     msg.attach(MIMEText(html_body, "html"))
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        server.ehlo()
+        server.starttls()
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.sendmail(EMAIL_SENDER, EMAIL_TO, msg.as_string())
     print("Email sent: " + subject)
