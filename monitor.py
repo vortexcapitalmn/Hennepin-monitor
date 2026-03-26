@@ -7,19 +7,17 @@ import schedule
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
+from bs4 import BeautifulSoup
 
 EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 EMAIL_TO = os.environ.get("EMAIL_TO")
 SEEN_FILE = "seen_records.json"
-
 BASE_URL = "https://foreclosure.hennepin.us"
-LIST_URL = BASE_URL + "/api/sales"
-DETAIL_URL = BASE_URL + "/api/sales/{sale_id}"
 
 HEADERS = {
-    "Accept": "application/json",
-    "User-Agent": "Mozilla/5.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
 }
 
 def load_seen():
@@ -32,82 +30,51 @@ def save_seen(seen):
     with open(SEEN_FILE, "w") as f:
         json.dump(list(seen), f)
 
-def fetch_all_sales():
+def fetch_sales():
     try:
-        params = {"page": 1, "pageSize": 100, "sortField": "saleDate", "sortDirection": "desc"}
-        resp = requests.get(LIST_URL, headers=HEADERS, params=params, timeout=30)
+        resp = requests.get(BASE_URL, headers=HEADERS, timeout=30)
         resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, list):
-            return data
-        return data.get("data", data.get("items", data.get("results", [])))
+        soup = BeautifulSoup(resp.text, "html.parser")
+        records = []
+        for row in soup.find_all(["tr", "div", "li"], attrs={"data-id": True}):
+            records.append({"id": row.get("data-id"), "html": str(row)})
+        if not records:
+            for link in soup.find_all("a", href=True):
+                href = link.get("href", "")
+                if "sale" in href.lower() or "record" in href.lower():
+                    record_id = href.split("/")[-1]
+                    if record_id.isdigit():
+                        records.append({"id": record_id, "href": href, "text": link.get_text()})
+        print("Found " + str(len(records)) + " records on page")
+        return records
     except Exception as e:
-        print("ERROR fetching sales: " + str(e))
+        print("ERROR fetching page: " + str(e))
         return []
 
-def fetch_detail(sale_id):
+def fetch_detail(record_id):
     try:
-        url = DETAIL_URL.replace("{sale_id}", str(sale_id))
+        url = BASE_URL + "/sale/" + str(record_id)
         resp = requests.get(url, headers=HEADERS, timeout=30)
         resp.raise_for_status()
-        return resp.json()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        detail = {"id": record_id}
+        for row in soup.find_all(["tr", "div"]):
+            text = row.get_text(separator="|").strip()
+            if "|" in text:
+                parts = text.split("|")
+                if len(parts) == 2:
+                    detail[parts[0].strip()] = parts[1].strip()
+        return detail
     except Exception as e:
         print("ERROR fetching detail: " + str(e))
         return {}
 
-def get_record_id(record):
-    for key in ["id", "saleRecordNumber", "saleId", "recordNumber"]:
-        if key in record:
-            return str(record[key])
-    return None
-
-def g(detail, *keys):
-    for k in keys:
-        v = detail.get(k)
-        if v:
-            return str(v)
-    return "N/A"
-
-def format_email(detail):
-    address = g(detail, "address", "unverifiedCommonAddress", "propertyAddress")
-    sale_date = g(detail, "saleDate", "dateOfSale")
-    sale_type = g(detail, "saleType", "typeOfSale")
-    mortgagor = g(detail, "mortgagors", "mortgagor", "borrower")
-    mortgagee = g(detail, "mortgagee", "lender")
-    sold_to = g(detail, "toWhomSold", "soldTo", "purchaser")
-    bid = g(detail, "finalBidAmount", "bidAmount", "salePrice")
-    redemption = g(detail, "redemptionExpirationDate", "redemptionDate")
-    law_firm = g(detail, "lawFirm", "attorney")
-    record_num = g(detail, "saleRecordNumber", "id", "recordNumber")
-    doc_num = g(detail, "mortgageDocumentNumber", "documentNumber")
-
-    subject = "NEW Foreclosure Lead: " + address
-
-    html = "<html><body style='font-family:Arial,sans-serif;max-width:600px;margin:auto;'>"
-    html += "<div style='background:#4a0e7a;color:white;padding:20px;'>"
-    html += "<h1>New Foreclosure Lead</h1></div>"
-    html += "<div style='padding:20px;border:1px solid #ddd;'>"
-    html += "<h2>" + address + "</h2>"
-    html += "<p><b>Record #:</b> " + record_num + "</p>"
-    html += "<p><b>Sale Date:</b> " + sale_date + "</p>"
-    html += "<p><b>Type:</b> " + sale_type + "</p>"
-    html += "<p><b>Mortgage Doc #:</b> " + doc_num + "</p>"
-    html += "<p><b>Owner (Mortgagor):</b> " + mortgagor + "</p>"
-    html += "<p><b>Lender (Mortgagee):</b> " + mortgagee + "</p>"
-    html += "<p><b>Sold To:</b> " + sold_to + "</p>"
-    html += "<p><b>Law Firm:</b> " + law_firm + "</p>"
-    html += "<p><b>Final Bid:</b> " + bid + "</p>"
-    html += "<p><b>Redemption Expires:</b> " + redemption + "</p>"
-    html += "</div></body></html>"
-
-    return subject, html
-
-def send_email(subject, html_body):
+def send_email(subject, body):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = EMAIL_SENDER
     msg["To"] = EMAIL_TO
-    msg.attach(MIMEText(html_body, "html"))
+    msg.attach(MIMEText(body, "html"))
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.sendmail(EMAIL_SENDER, EMAIL_TO, msg.as_string())
@@ -119,29 +86,35 @@ def now():
 def check_for_new_sales():
     print("[" + now() + "] Checking Hennepin County...")
     seen = load_seen()
-    sales = fetch_all_sales()
+    sales = fetch_sales()
     if not sales:
-        print("No records returned - site may be down")
+        print("No records found - site may be down or structure changed")
         return
     new_count = 0
     for record in sales:
-        record_id = get_record_id(record)
+        record_id = str(record.get("id", ""))
         if not record_id:
             continue
         if record_id not in seen:
             print("NEW record: " + record_id)
             detail = fetch_detail(record_id)
-            if not detail:
-                detail = record
+            subject = "NEW Foreclosure Lead #" + record_id
+            body = "<html><body style='font-family:Arial;padding:20px;'>"
+            body += "<h2 style='color:#4a0e7a;'>New Foreclosure Lead</h2>"
+            body += "<p><b>Record ID:</b> " + record_id + "</p>"
+            for k, v in detail.items():
+                if k != "id":
+                    body += "<p><b>" + str(k) + ":</b> " + str(v) + "</p>"
+            body += "<br><a href='" + BASE_URL + "'>View on Hennepin County Site</a>"
+            body += "</body></html>"
             try:
-                subject, html = format_email(detail)
-                send_email(subject, html)
+                send_email(subject, body)
             except Exception as e:
                 print("ERROR sending email: " + str(e))
             seen.add(record_id)
             new_count += 1
     save_seen(seen)
-    print("Done. " + str(new_count) + " new leads. Total tracked: " + str(len(seen)))
+    print("Done. " + str(new_count) + " new leads. Total: " + str(len(seen)))
 
 if __name__ == "__main__":
     print("Hennepin Foreclosure Monitor starting...")
