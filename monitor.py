@@ -138,7 +138,12 @@ def is_2026_sale(detail):
     sale_date_str = g(detail, "saleDate", "dateOfSale")
     if sale_date_str == "N/A":
         return False
+    skip_months = ["Jan 2026", "January 2026", "Feb 2026", "February 2026", "01/2026", "02/2026"]
+    for month in skip_months:
+        if month.lower() in sale_date_str.lower():
+            return False
     return "2026" in sale_date_str
+
 
 
 def format_email(detail):
