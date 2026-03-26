@@ -14,6 +14,7 @@ EMAIL_TO = os.environ.get("EMAIL_TO")
 SEEN_FILE = "seen_records.json"
 
 API_URL = "https://api.hennepincounty.gov/hcso-public-services-api/v1/Foreclosure/Search"
+DETAIL_URL = "https://api.hennepincounty.gov/hcso-public-services-api/v1/Foreclosure/"
 
 HEADERS = {
     "Content-Type": "application/json",
@@ -21,6 +22,7 @@ HEADERS = {
     "Origin": "https://foreclosure.hennepin.us",
     "Referer": "https://foreclosure.hennepin.us/",
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Ocp-Apim-Subscription-Key": "e522a816143443189f09de85c4288b98",
 }
 
 PAYLOAD = {
@@ -46,10 +48,10 @@ def fetch_sales():
         resp = requests.post(API_URL, headers=HEADERS, json=PAYLOAD, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        print("API response keys: " + str(list(data.keys()) if isinstance(data, dict) else type(data)))
+        print("API keys: " + str(list(data.keys()) if isinstance(data, dict) else type(data)))
         if isinstance(data, list):
             return data
-        for key in ["data", "items", "results", "records", "foreclosures"]:
+        for key in ["data", "items", "results", "records", "foreclosures", "value"]:
             if key in data:
                 return data[key]
         return []
@@ -59,8 +61,7 @@ def fetch_sales():
 
 def fetch_detail(record_id):
     try:
-        url = "https://api.hennepincounty.gov/hcso-public-services-api/v1/Foreclosure/" + str(record_id)
-        resp = requests.get(url, headers=HEADERS, timeout=30)
+        resp = requests.get(DETAIL_URL + str(record_id), headers=HEADERS, timeout=30)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
