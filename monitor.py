@@ -9,7 +9,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
 
 EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
@@ -18,11 +17,7 @@ SEEN_FILE = "seen_records.json"
 
 API_URL = "https://api.hennepincounty.gov/hcso-public-services-api/v1/Foreclosure/Search"
 DETAIL_URL = "https://api.hennepincounty.gov/hcso-public-services-api/v1/Foreclosure/"
-
-# Public property search page
-HENNEPIN_SEARCH_PAGE = "https://www16.co.hennepin.mn.us/pins/addrsrch.jsp"
-
-# eCRV public search page currently used in your workflow
+HENNEPIN_SEARCH_URL = "https://www16.co.hennepin.mn.us/pins/addresssearch"
 ECRV_SEARCH_URL = "https://www.mndor.state.mn.us/ecrv_search/app/findEcrvByParcelId"
 
 HEADERS = {
@@ -31,14 +26,12 @@ HEADERS = {
     "Origin": "https://foreclosure.hennepin.us",
     "Referer": "https://foreclosure.hennepin.us/",
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-    "Ocp-Apim-Subscription-Key": os.environ.get("HENNEPIN_SUBSCRIPTION_KEY", ""),
+    "Ocp-Apim-Subscription-Key": "e522a816143443189f09de85c4288b98",
 }
 
 WEB_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive",
 }
 
 BASE_PAYLOAD = {
@@ -49,16 +42,11 @@ BASE_PAYLOAD = {
     "pagination": {"activePage": 1, "pageSize": 100}
 }
 
-PID_REGEX = re.compile(r"\b\d{2}-\d{3}-\d{2}-\d{2}-\d{4}\b")
-
 
 def load_seen():
     if os.path.exists(SEEN_FILE):
-        try:
-            with open(SEEN_FILE, "r") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
+        with open(SEEN_FILE, "r") as f:
+            return set(json.load(f))
     return set()
 
 
@@ -77,7 +65,6 @@ def fetch_sales():
             resp = requests.post(API_URL, headers=HEADERS, json=payload, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-
             records = None
             if isinstance(data, list):
                 records = data
@@ -86,24 +73,18 @@ def fetch_sales():
                     if key in data:
                         records = data[key]
                         break
-
             if not records:
                 print(f"No more records found on page {page}")
                 break
-
             print(f"Fetched page {page} with {len(records)} records")
             all_records.extend(records)
-
             if len(records) < 100:
                 break
-
             page += 1
             time.sleep(0.5)
-
         except Exception as e:
             print("ERROR fetching sales: " + str(e))
             break
-
     return all_records
 
 
@@ -129,7 +110,6 @@ def g(detail, *keys):
         v = detail.get(k)
         if not v:
             continue
-
         if isinstance(v, list):
             values = []
             for item in v:
@@ -141,15 +121,12 @@ def g(detail, *keys):
                 else:
                     values.append(str(item))
             return "<br>".join(values) if values else "N/A"
-
         if isinstance(v, dict):
             if v.get("display"):
                 return str(v["display"])
             if v.get("name"):
                 return str(v["name"])
-
         return str(v)
-
     return "N/A"
 
 
@@ -157,245 +134,81 @@ def is_2026_sale(detail):
     sale_date_str = g(detail, "saleDate", "dateOfSale")
     if sale_date_str == "N/A":
         return False
-
     skip_months = ["Jan 2026", "January 2026", "Feb 2026", "February 2026", "01/2026", "02/2026"]
     for month in skip_months:
         if month.lower() in sale_date_str.lower():
             return False
-
     return "2026" in sale_date_str
 
 
-def clean_whitespace(s):
-    return re.sub(r"\s+", " ", s or "").strip()
-
-
-def parse_hennepin_address(address_str):
-    """
-    Convert raw foreclosure address into:
-      house_num, street_name, unit_num
-
-    Examples:
-      2607 64th Ave N -> 2607 / 64th Ave N / ""
-      2885 Knox Ave S #803 -> 2885 / Knox Ave S / 803
-      2739 Girard Ave S #101 Minneapolis MN -> 2739 / Girard Ave S / 101
-    """
-    if not address_str:
-        return "", "", ""
-
-    addr = clean_whitespace(address_str)
-
-    # Remove trailing ZIP if present
-    addr = re.sub(r"\bMN\s+\d{5}(?:-\d{4})?$", "", addr, flags=re.IGNORECASE).strip()
-    addr = re.sub(r"\b\d{5}(?:-\d{4})?$", "", addr).strip()
-
-    # Extract unit
-    unit_num = ""
-    unit_match = re.search(r"(?:#|Unit\s+|Apt\s+|Apartment\s+|Suite\s+)([A-Za-z0-9\-]+)\b", addr, re.IGNORECASE)
-    if unit_match:
-        unit_num = unit_match.group(1).strip()
-        addr = clean_whitespace(addr[:unit_match.start()] + " " + addr[unit_match.end():])
-
-    # Remove common city/state tails
-    addr = re.sub(
-        r",?\s*(Minneapolis|Robbinsdale|Brooklyn Park|Brooklyn Center|Golden Valley|Eden Prairie|Edina|Bloomington|Plymouth|Maple Grove|Minnetonka|Richfield|Crystal|New Hope|Hopkins|St Louis Park|Saint Louis Park|Minneapolis MN|Minneapolis, MN)\b.*$",
-        "",
-        addr,
-        flags=re.IGNORECASE,
-    ).strip(" ,")
-
-    m = re.match(r"^(\d+)\s+(.+)$", addr)
-    if not m:
-        return "", addr, unit_num
-
-    house_num = m.group(1).strip()
-    street_name = m.group(2).strip(" ,")
-
-    return house_num, street_name, unit_num
-
-
-def extract_pid_from_text(text):
-    if not text:
-        return None
-    m = PID_REGEX.search(text)
-    return m.group(0) if m else None
-
-
 def get_parcel_id(address_str):
-    """
-    Best-effort PID lookup from Hennepin public property search.
-
-    Important:
-    - Hennepin may change field names or block scraping.
-    - This tries multiple likely query parameter combinations because the public page
-      is HTML-driven and not a documented API.
-    """
     try:
-        house_num, street_name, unit_num = parse_hennepin_address(address_str)
-
-        if not house_num or not street_name:
-            print("Could not parse address for PID lookup: " + str(address_str))
-            return None
-
-        print(f"Parsed address -> house: {house_num}, street: {street_name}, unit: {unit_num}")
-
-        session = requests.Session()
-        session.headers.update(WEB_HEADERS)
-
-        # Load the page first
-        landing = session.get(HENNEPIN_SEARCH_PAGE, timeout=30)
-        landing.raise_for_status()
-
-        # Try several plausible param combinations because this page is not a documented API
-        candidate_param_sets = [
-            {
-                "houseNumber": house_num,
-                "streetName": street_name,
-                "unitNumber": unit_num,
-                "recordsPerPage": 20,
-            },
-            {
-                "houseNumber": house_num,
-                "streetName": street_name,
-                "unit": unit_num,
-                "recordsPerPage": 20,
-            },
-            {
-                "house": house_num,
-                "street": street_name,
-                "unit": unit_num,
-                "recordsPerPage": 20,
-            },
-            {
-                "houseNumber": house_num,
-                "streetName": street_name,
-                "recordsPerPage": 20,
-            },
-        ]
-
-        for i, params in enumerate(candidate_param_sets, start=1):
-            try:
-                # remove empty values
-                params = {k: v for k, v in params.items() if v not in ("", None)}
-                print(f"PID lookup attempt {i}: {params}")
-
-                resp = session.get(HENNEPIN_SEARCH_PAGE, params=params, timeout=30)
-                resp.raise_for_status()
-
-                pid = extract_pid_from_text(resp.text)
-                if pid:
-                    print("Found PID directly on search page: " + pid)
-                    return pid
-
-                soup = BeautifulSoup(resp.text, "html.parser")
-
-                # Look for result links and follow them
-                candidate_links = []
-                for a in soup.find_all("a", href=True):
-                    href = a["href"]
-                    text = clean_whitespace(a.get_text(" ", strip=True))
-
-                    if "pins" in href.lower() or PID_REGEX.search(text):
-                        candidate_links.append(urljoin(HENNEPIN_SEARCH_PAGE, href))
-
-                seen_links = set()
-                for link in candidate_links[:10]:
-                    if link in seen_links:
-                        continue
-                    seen_links.add(link)
-
-                    try:
-                        dresp = session.get(link, timeout=30)
-                        dresp.raise_for_status()
-                        pid = extract_pid_from_text(dresp.text)
-                        if pid:
-                            print("Found PID on detail page: " + pid)
-                            return pid
-                    except Exception as sub_e:
-                        print("Detail page follow failed: " + str(sub_e))
-
-            except Exception as attempt_e:
-                print(f"PID lookup attempt {i} failed: {attempt_e}")
-
+        parts = address_str.strip().split(" ")
+        house_num = parts[0]
+        street_name = " ".join(parts[1:])
+        cities = ["Minneapolis", "Robbinsdale", "Brooklyn Park", "Brooklyn Center",
+                  "Golden Valley", "Eden Prairie", "Edina", "Bloomington", "Plymouth",
+                  "Maple Grove", "Minnetonka", "Richfield", "Crystal", "New Hope",
+                  "Hopkins", "St Louis Park", "Saint Louis Park"]
+        for city in cities:
+            street_name = re.sub(r'\b' + city + r'\b', '', street_name, flags=re.IGNORECASE).strip()
+        params = {
+            "houseNumber": house_num,
+            "streetName": street_name,
+            "recordsPerPage": 20
+        }
+        resp = requests.get(HENNEPIN_SEARCH_URL, params=params, headers=WEB_HEADERS, timeout=30)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for elem in soup.find_all(string=re.compile(r'\d{2}-\d{3}-\d{2}-\d{2}-\d{4}')):
+            pid = elem.strip()
+            print("Found PID: " + pid)
+            return pid
         print("No PID found for: " + address_str)
         return None
-
     except Exception as e:
         print("ERROR getting parcel ID: " + str(e))
         return None
 
 
 def get_ecrv_info(parcel_id):
-    """
-    Best-effort eCRV enrichment by parcel ID.
-    This may stop working if the public search flow or HTML changes.
-    """
     try:
-        parcel_id_clean = re.sub(r"[^0-9]", "", parcel_id or "")
-        if not parcel_id_clean:
-            return None
-
+        parcel_id_clean = parcel_id.replace("-", "")
         params = {
             "searchType": "completed",
-            "county": "27",   # Hennepin
+            "county": "27",
             "parcelId": parcel_id_clean
         }
-
         resp = requests.get(ECRV_SEARCH_URL, params=params, headers=WEB_HEADERS, timeout=30)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
-
-        # Find first plausible eCRV result link
         ecrv_link = None
         for link in soup.find_all("a", href=True):
             href = link.get("href", "")
-            label = clean_whitespace(link.get_text(" ", strip=True))
-            if "ecrv" in href.lower() or re.fullmatch(r"\d+", label or ""):
+            if "ecrv" in href.lower() or link.get_text(strip=True).isdigit():
                 ecrv_link = href
                 if not ecrv_link.startswith("http"):
-                    ecrv_link = urljoin(ECRV_SEARCH_URL, ecrv_link)
+                    ecrv_link = "https://www.mndor.state.mn.us" + ecrv_link
                 break
-
         if not ecrv_link:
             print("No eCRV link found for parcel: " + parcel_id)
             return None
-
         print("Found eCRV: " + ecrv_link)
         resp2 = requests.get(ecrv_link, headers=WEB_HEADERS, timeout=30)
         resp2.raise_for_status()
         soup2 = BeautifulSoup(resp2.text, "html.parser")
-        text = soup2.get_text("\n", strip=True)
-
+        text = soup2.get_text()
         info = {"ecrv_url": ecrv_link}
-
-        # Best-effort regex extraction
-        patterns = {
-            "owner_name": [
-                r"Person name:\s*(.+)",
-                r"Buyer name:\s*(.+)",
-                r"Name:\s*(.+)",
-            ],
-            "owner_phone": [
-                r"Phone number:\s*([()\d\-\+\.\s]{7,})",
-                r"Phone:\s*([()\d\-\+\.\s]{7,})",
-            ],
-            "owner_address": [
-                r"Address:\s*(.+)",
-                r"Buyer address:\s*(.+)",
-            ],
-        }
-
-        for key, regexes in patterns.items():
-            for rx in regexes:
-                m = re.search(rx, text, re.IGNORECASE)
-                if m:
-                    value = clean_whitespace(m.group(1))
-                    if value:
-                        info[key] = value
-                        break
-
+        name_match = re.search(r"Person name:\s*\n\s*(.+)", text)
+        if name_match:
+            info["owner_name"] = name_match.group(1).strip()
+        phone_match = re.search(r"Phone number:\s*([\(\d\)\s\-]+)", text)
+        if phone_match:
+            info["owner_phone"] = phone_match.group(1).strip()
+        addr_match = re.search(r"Address:\s*\n\s*(.+)", text)
+        if addr_match:
+            info["owner_address"] = addr_match.group(1).strip()
         return info
-
     except Exception as e:
         print("ERROR getting eCRV info: " + str(e))
         return None
@@ -449,7 +262,7 @@ def format_email(detail, parcel_id=None, ecrv_info=None):
         html += "</div>"
     elif parcel_id:
         html += "<div style='margin-top:20px;padding:15px;background:#fff3cd;border-left:4px solid orange;border-radius:4px;'>"
-        html += "<p><b>No eCRV found</b> or public data could not be parsed.</p>"
+        html += "<p><b>No eCRV found</b> — property likely purchased before 2014.</p>"
         html += "</div>"
 
     html += "<br><a href='https://foreclosure.hennepin.us' style='background:#4a0e7a;color:white;padding:10px 20px;text-decoration:none;'>View on Hennepin County Site</a>"
@@ -464,7 +277,6 @@ def send_email(subject, html_body, max_retries=3):
     msg["From"] = EMAIL_SENDER
     msg["To"] = EMAIL_TO
     msg.attach(MIMEText(html_body, "html"))
-
     for attempt in range(1, max_retries + 1):
         server = None
         try:
@@ -486,7 +298,7 @@ def send_email(subject, html_body, max_retries=3):
             if server:
                 try:
                     server.quit()
-                except Exception:
+                except:
                     pass
 
 
@@ -498,66 +310,50 @@ def check_for_new_sales():
     print("[" + now() + "] Checking Hennepin County...")
     seen = load_seen()
     print("Loaded seen records: " + str(len(seen)))
-
     sales = fetch_sales()
     if not sales:
         print("No records returned")
         return
-
     print("Found " + str(len(sales)) + " total records across all pages")
-
     new_count = 0
     skipped_non_2026 = 0
-
     for record in sales:
         record_id = get_record_id(record)
         if not record_id:
             continue
-
         if record_id in seen:
             continue
-
         print("NEW record candidate: " + record_id)
-
         detail = fetch_detail(record_id)
         if not detail:
             detail = record
-
         if not is_2026_sale(detail):
             skipped_non_2026 += 1
             print("Skipping non-2026 record: " + record_id)
             seen.add(record_id)
             continue
-
         address = g(detail, "address", "unverifiedCommonAddress", "propertyAddress")
         parcel_id = None
         ecrv_info = None
-
         if address and address != "N/A":
             print("Looking up parcel ID for: " + address)
             parcel_id = get_parcel_id(address)
-
             if parcel_id:
                 time.sleep(1)
                 print("Looking up eCRV for: " + parcel_id)
                 ecrv_info = get_ecrv_info(parcel_id)
-
         try:
             subject, html = format_email(detail, parcel_id, ecrv_info)
             success = send_email(subject, html)
-
             if success:
                 seen.add(record_id)
                 new_count += 1
                 print("Marked seen: " + record_id)
             else:
                 print("FAILED permanently, will retry next run: " + record_id)
-
         except Exception as e:
             print("ERROR sending email for " + record_id + ": " + str(e))
-
         time.sleep(1.5)
-
     save_seen(seen)
     print("Done. " + str(new_count) + " new 2026 leads emailed.")
     print("Skipped non-2026 leads: " + str(skipped_non_2026))
